@@ -2,11 +2,14 @@ import tensorflow.keras.backend as K
 import tensorflow.keras.layers as layers
 import numpy as np
 from RoiPoolingConv import RoiPoolingConv
+import tensorflow as tf
+
+tf.config.experimental_run_functions_eagerly(True)
 
 
 def get_img_output_length(width, height):
     def get_output_length(input_length):
-        return input_length//32
+        return input_length // 32
 
     return get_output_length(width), get_output_length(height)
 
@@ -91,9 +94,9 @@ def _shuffle_unit(inputs, input_channels, out_channels, groups, bottleneck_ratio
     x = layers.BatchNormalization(axis=bn_axis, name='%s/bn_gconv_1' % prefix)(x)
     x = layers.Activation('relu', name='%s/relu_gconv_1' % prefix)(x)
 
-    # channel shuffle
+    # # channel shuffle
     x = layers.Lambda(channel_shuffle, arguments={'groups': groups}, name='%s/channel_shuffle' % prefix)(x)
-
+    # x = channel_shuffle_ver2(groups=groups)(x)
     # DepthWise Convolution
     x = layers.DepthwiseConv2D(kernel_size=(3, 3), padding='same', use_bias=False, strides=strides,
                                name='%s/1x1_dwconv_1' % prefix)(x)
@@ -161,6 +164,29 @@ def _group_conv(x, input_channels, out_channels, groups, kernel=1, stride=1, nam
     return layers.Concatenate(name='%s/concat' % name)(group_list)
 
 
+class _group_conv2(layers.Layer):
+    def __init__(self, input_channels, out_channels, groups, kernel, stride, name):
+        super(_group_conv2, self).__init__()
+        self.groups = groups
+
+        offset = input_channels // groups
+        self.convs = [layers.Conv2D(int(0.5 + out_channels / self.groups), kernel_size=kernel, strides=stride,
+                                    use_bias=False, padding='same', name='%s_/g%d' % (name, i)) for i in
+                      range(self.groups)]
+        self.lambdas = [layers.Lambda(lambda x: x[:, :, :, i * offset: offset * (i + 1)],
+                                      name='%s/g%d_slice' % (name, i)) for i in range(self.groups)]
+        self.concat = layers.Concatenate(name='%s/concat' % name)
+
+    def call(self, inputs, **kwargs):
+        group_list = []
+        for i in range(self.groups):
+            group = self.lambdas[i](inputs)
+            conv = self.convs[i](group)
+            group_list.append(conv)
+
+        return self.concat(group_list)
+
+
 def channel_shuffle(x, groups):
     """
     Parameters
@@ -181,6 +207,27 @@ def channel_shuffle(x, groups):
     x = K.reshape(x, [-1, height, width, in_channels])
 
     return x
+
+
+class channel_shuffle_ver2(layers.Layer):
+    def __init__(self, groups):
+        super(channel_shuffle_ver2, self).__init__()
+        self.groups = groups
+
+    def build(self, input_shape):
+        height, width, channels = input_shape[1:]
+        print(height, width, channels)
+        channels_per_group = channels / self.groups
+        channels_per_group = tf.cast(channels_per_group, 'int32')
+        self.reshape_ver1 = layers.Reshape([height, width, self.groups, channels_per_group])
+        self.permute_dimension = layers.Permute(dims=(1, 2, 4, 3))
+        self.reshape_ver2 = layers.Reshape([height, width, channels])
+
+    def call(self, inputs, **kwargs):
+        x = self.reshape_ver1(inputs)
+        x = self.permute_dimension(x)
+        x = self.reshape_ver2(x)
+        return x
 
 
 def shuffle_net(input_tensor, scale_factor=1, pooling='avg', input_shape=(224, 224, 3),
@@ -218,24 +265,29 @@ def shuffle_net(input_tensor, scale_factor=1, pooling='avg', input_shape=(224, 2
         x = _block(x, out_channels_in_stage, repeat=repeat, bottleneck_ratio=botteleneck_ratio,
                    groups=groups, stage=stage + 2)
 
-    # if pooling == 'avg':
-    #     x = layers.GlobalAveragePooling2D(name='global_pool')(x)
-    # elif pooling == 'max':
-    #     x = layers.GlobalMaxPooling2D(name='global_pool')(x)
-    # print('L2: ', x.shape)
-    # print('OUTPUT BACHBONE: ', x.shape)
     return x
 
 
-def rpn(base_layer, num_anchors):
-    x = layers.Conv2D(filters=512, kernel_size=3, padding='same', activation='relu', kernel_initializer='normal',
-                      name='rpn_conv1')(base_layer)
+def rpn(base_layer, num_anchors, input_channels=960, bottleneck_ratio=0.25, output_channels=512, groups=3,
+        kernel_size=3):
+    # x = layers.Conv2D(filters=512, kernel_size=3, padding='same', activation='relu', kernel_initializer='normal',
+    #                   name='rpn_conv1')(base_layer)
+    # 1x1 GConv
+    bottleneck_channels = int(output_channels * bottleneck_ratio)
+    x = _group_conv(base_layer, input_channels, out_channels=bottleneck_channels, groups=groups, kernel=kernel_size,
+                    name='rpn_conv1')
+
+    x = layers.BatchNormalization(axis=-1, name='rpn_bn')(x)
+    x = layers.Activation('relu', name='rpn_relu')(x)
+
+    # channel shuffle
+    # x = layers.Lambda(channel_shuffle, arguments={'groups': groups}, name='rpn_channel_shuffle')(x)
+
     x_class = layers.Conv2D(num_anchors, (1, 1), activation='sigmoid', kernel_initializer='uniform',
                             name='rpn_out_classes')(x)
     x_reg = layers.Conv2D(num_anchors * 4, (1, 1), activation='linear', kernel_initializer='zero',
                           name='rpn_ot_regress')(x)
-    # print('X_class: ', x_class.shape)
-    # print('X-reg: ', x_reg.shape)
+
     return [x_class, x_reg, base_layer]
 
 
@@ -248,24 +300,27 @@ def conv_block_td(input_tensor, kernel_size, filters, stage, block, input_shape,
     x = layers.TimeDistributed(
         layers.Convolution2D(nb_filter1, (1, 1), strides=strides, trainable=trainable, kernel_initializer='normal'),
         input_shape=input_shape, name=conv_name_base + '2a')(input_tensor)
+
     x = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '2a')(x)
     x = layers.Activation('relu')(x)
 
     x = layers.TimeDistributed(
         layers.Convolution2D(nb_filter2, (kernel_size, kernel_size), padding='same', trainable=trainable,
                              kernel_initializer='normal'), name=conv_name_base + '2b')(x)
+
     x = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '2b')(x)
     x = layers.Activation('relu')(x)
 
     x = layers.TimeDistributed(layers.Convolution2D(nb_filter3, (1, 1), kernel_initializer='normal'),
                                name=conv_name_base + '2c', trainable=trainable)(x)
+
     x = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '2c')(x)
 
     shortcut = layers.TimeDistributed(
         layers.Convolution2D(nb_filter3, (1, 1), strides=strides, trainable=trainable, kernel_initializer='normal'),
         name=conv_name_base + '1')(input_tensor)
-    shortcut = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '1')(shortcut)
 
+    shortcut = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '1')(shortcut)
     x = layers.Add()([x, shortcut])
     x = layers.Activation('relu')(x)
     return x
@@ -273,7 +328,6 @@ def conv_block_td(input_tensor, kernel_size, filters, stage, block, input_shape,
 
 def identity_block_td(input_tensor, kernel_size, filters, stage, block, trainable=True):
     # identity block time distributed
-
     nb_filter1, nb_filter2, nb_filter3 = filters
 
     conv_name_base = 'res' + str(stage) + block + '_branch'
@@ -282,12 +336,14 @@ def identity_block_td(input_tensor, kernel_size, filters, stage, block, trainabl
     x = layers.TimeDistributed(
         layers.Convolution2D(nb_filter1, (1, 1), trainable=trainable, kernel_initializer='normal'),
         name=conv_name_base + '2a')(input_tensor)
+
     x = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '2a')(x)
     x = layers.Activation('relu')(x)
 
     x = layers.TimeDistributed(
         layers.Convolution2D(nb_filter2, (kernel_size, kernel_size), trainable=trainable, kernel_initializer='normal',
                              padding='same'), name=conv_name_base + '2b')(x)
+
     x = layers.TimeDistributed(layers.BatchNormalization(axis=3), name=bn_name_base + '2b')(x)
     x = layers.Activation('relu')(x)
 

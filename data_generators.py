@@ -1,9 +1,6 @@
 import numpy as np
 import cv2
 import random
-import copy
-import threading
-import itertools
 import data_augment as augment
 
 
@@ -209,7 +206,8 @@ def calc_rpn(C, img_data, width, height, resized_width, resized_height, img_leng
                     idx, 2] + n_anchratios *
                 best_anchor_for_bbox[idx, 3]] = 1
             start = 4 * (best_anchor_for_bbox[idx, 2] + n_anchratios * best_anchor_for_bbox[idx, 3])
-            y_rpn_regr[best_anchor_for_bbox[idx, 0], best_anchor_for_bbox[idx, 1], start:start + 4] = best_dx_for_bbox[idx, :]
+            y_rpn_regr[best_anchor_for_bbox[idx, 0], best_anchor_for_bbox[idx, 1], start:start + 4] = best_dx_for_bbox[
+                                                                                                      idx, :]
 
     y_rpn_overlap = np.transpose(y_rpn_overlap, (2, 0, 1))
     y_rpn_overlap = np.expand_dims(y_rpn_overlap, axis=0)
@@ -244,85 +242,53 @@ def calc_rpn(C, img_data, width, height, resized_width, resized_height, img_leng
     return np.copy(y_rpn_cls), np.copy(y_rpn_regr)
 
 
-class SampleSelector:
-    def __init__(self, class_count):
-        # ignore classes that have zero samples
-        self.classes = [b for b in class_count.keys() if class_count[b] > 0]
-        self.class_cycle = itertools.cycle(self.classes)
-        self.curr_class = next(self.class_cycle)
-
-    def skip_sample_for_balanced_class(self, img_data):
-        class_in_img = False
-
-        for bbox in img_data['bboxes']:
-            cls_name = bbox['class']
-
-            if cls_name == self.curr_class:
-                class_in_img = True
-                self.curr_class = next(self.class_cycle)
-                break
-
-        if class_in_img:
-            return False
-        else:
-            return True
-
-
-def get_anchor_gt(all_img_data, class_count, C, img_length_calc_function, mode='train'):
-    sample_selector = SampleSelector(class_count)
+def get_anchor_gt(all_img_data, C, img_length_calc_function, mode='train'):
     while True:
-        if mode == 'train':
-            np.random.shuffle(all_img_data)
+        np.random.shuffle(all_img_data)
+        for i, img_data in enumerate(all_img_data):
+            try:
+                if mode == 'train':
+                    img_data_aug, x_img = augment.augment(img_data, C, augment=True)
+                else:
+                    img_data_aug, x_img = augment.augment(img_data, C, augment=False)
 
-            for img_data in all_img_data:
+                (width, height) = (img_data_aug['width'], img_data_aug['height'])
+                (rows, cols, _) = x_img.shape
+
+                assert cols == width
+                assert rows == height
+
+                # get image dimensions for resizing
+                (resized_width, resized_height) = get_new_img_size(width, height, C.im_size)
+                # resized_width, resized_height = 224, 224
+                # resize the image so that smallest side is length = 600px
+                x_img = cv2.resize(x_img, (resized_width, resized_height), interpolation=cv2.INTER_CUBIC)
+
                 try:
-                    if C.balanced_classes and sample_selector.skip_sample_for_balanced_class(img_data):
-                        continue
-
-                    if mode == 'train':
-                        img_data_aug, x_img = augment.augment(img_data, C, augment=True)
-                    else:
-                        img_data_aug, x_img = augment.augment(img_data, C, augment=False)
-
-                    (width, height) = (img_data_aug['width'], img_data_aug['height'])
-                    (rows, cols, _) = x_img.shape
-
-                    assert cols == width
-                    assert rows == height
-
-                    # get image dimensions for resizing
-                    # (resized_width, resized_height) = get_new_img_size(width, height, C.im_size)
-                    resized_width, resized_height = 224, 224
-                    # resize the image so that smallest side is length = 600px
-                    x_img = cv2.resize(x_img, (resized_width, resized_height), interpolation=cv2.INTER_CUBIC)
-
-                    try:
-                        y_rpn_cls, y_rpn_regr = calc_rpn(C, img_data_aug, width, height, resized_width, resized_height,
-                                                         img_length_calc_function)
-                    except:
-                        continue
-
-                    # Zero-center by mean pixel, and preprocess image
-
-                    x_img = x_img[:, :, (2, 1, 0)]  # BGR -> RGB
-                    x_img = x_img.astype(np.float32)
-                    x_img[:, :, 0] -= C.img_channel_mean[0]
-                    x_img[:, :, 1] -= C.img_channel_mean[1]
-                    x_img[:, :, 2] -= C.img_channel_mean[2]
-                    x_img /= C.img_scaling_factor
-
-                    x_img = np.transpose(x_img, (2, 0, 1))
-                    x_img = np.expand_dims(x_img, axis=0)
-
-                    y_rpn_regr[:, y_rpn_regr.shape[1] // 2:, :, :] *= C.std_scaling
-
-                    x_img = np.transpose(x_img, (0, 2, 3, 1))
-                    y_rpn_cls = np.transpose(y_rpn_cls, (0, 2, 3, 1))
-                    y_rpn_regr = np.transpose(y_rpn_regr, (0, 2, 3, 1))
-                    # print('Y rpn cls get data: ', y_rpn_cls.shape)
-                    # print('Y rpn regr get data: ', y_rpn_regr.shape)
-                    yield np.copy(x_img), [np.copy(y_rpn_cls), np.copy(y_rpn_regr)], img_data_aug
-
-                except Exception as e:
-                    print(e)
+                    y_rpn_cls, y_rpn_regr = calc_rpn(C, img_data_aug, width, height, resized_width, resized_height,
+                                                     img_length_calc_function)
+                except:
                     continue
+
+                # Zero-center by mean pixel, and preprocess image
+
+                x_img = x_img[:, :, (2, 1, 0)]  # BGR -> RGB
+                x_img = x_img.astype(np.float32)
+                x_img[:, :, 0] -= C.img_channel_mean[0]
+                x_img[:, :, 1] -= C.img_channel_mean[1]
+                x_img[:, :, 2] -= C.img_channel_mean[2]
+                x_img /= C.img_scaling_factor
+
+                x_img = np.transpose(x_img, (2, 0, 1))
+                x_img = np.expand_dims(x_img, axis=0)
+
+                y_rpn_regr[:, y_rpn_regr.shape[1] // 2:, :, :] *= C.std_scaling
+
+                x_img = np.transpose(x_img, (0, 2, 3, 1))
+                y_rpn_cls = np.transpose(y_rpn_cls, (0, 2, 3, 1))
+                y_rpn_regr = np.transpose(y_rpn_regr, (0, 2, 3, 1))
+
+                yield np.copy(x_img), [np.copy(y_rpn_cls), np.copy(y_rpn_regr)], img_data_aug
+            except Exception as e:
+                print(e)
+                continue

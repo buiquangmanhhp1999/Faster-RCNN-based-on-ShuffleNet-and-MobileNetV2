@@ -35,7 +35,7 @@ def class_loss_regr(num_classes):
     def class_loss_regr_fixed_num(y_true, y_pred):
         # print('Y True:', y_true.shape)
         # print('Y_pred: ', y_pred.shape)
-        # y_true = tf.cast(y_true, 'float32')
+        y_true = tf.cast(y_true, 'float32')
         x = y_true[:, :, 4 * num_classes:] - y_pred
         x_abs = K.abs(x)
         x_bool = K.cast(K.less_equal(x_abs, 1.0), tf.float32)

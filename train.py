@@ -10,9 +10,13 @@ from data_utils import get_data
 import pprint
 import pickle
 import shuffle_net
+import MobileNetV2
 from tensorflow.keras import optimizers
 import roi_helper
 from tensorflow.keras.utils import Progbar
+import tensorflow as tf
+
+tf.config.experimental.list_physical_devices('GPU')
 
 parser = OptionParser()
 parser.add_option("-p", "--path", dest="train_path", help="Path to training data.",
@@ -72,29 +76,40 @@ val_imgs = [s for s in all_imgs if s['imageset'] == 'val']
 print('Num train samples {}'.format(len(train_imgs)))
 print('Num val samples {}'.format(len(val_imgs)))
 
-data_gen_train = generators.get_anchor_gt(train_imgs, classes_count, C, shuffle_net.get_img_output_length, mode='train')
-data_gen_val = generators.get_anchor_gt(val_imgs, classes_count, C, shuffle_net.get_img_output_length, mode='val')
+data_gen_train = generators.get_anchor_gt(train_imgs, C, shuffle_net.get_img_output_length, mode='train')
+data_gen_val = generators.get_anchor_gt(val_imgs, C, shuffle_net.get_img_output_length, mode='val')
 
-img_input = layers.Input(shape=(224, 224, 3))
+img_input = layers.Input(shape=(None, None, 3))
 roi_input = layers.Input(shape=(None, 4))
 
 # define the base network, here is ShuffleNet
-shared_layers = shuffle_net.shuffle_net(img_input)
+# shared_layers = shuffle_net.shuffle_net(img_input)
 # shared_layers = shuffle_net.nn_base(img_input)
+shared_layers = MobileNetV2.nn_base(img_input)
 
 # define the RPN, built on the base layers
 num_anchors = len(C.anchor_box_scales) * len(C.anchor_box_ratios)
-rpn = shuffle_net.rpn(shared_layers, num_anchors)
+rpn = MobileNetV2.rpn(shared_layers, num_anchors)
 
-classifier = shuffle_net.classifier(shared_layers, roi_input, C.num_rois, nb_classes=len(classes_count))
+classifier = MobileNetV2.classifier(shared_layers, roi_input, C.num_rois, nb_classes=len(classes_count))
 
 # define model
 model_rpn = Model(img_input, rpn[:2])
 model_classifier = Model([img_input, roi_input], classifier)
 
+if C.model_path is not None:
+    print('Load weight from ' + C.model_path)
+    model_rpn.load_weights(C.model_path, by_name=True)
+    model_classifier.load_weights(C.model_path, by_name=True)
+
 # this is a model that holds both the RPN and the classifier, used to load/save weights for the models
 model_all = Model([img_input, roi_input], rpn[:2] + classifier)
-
+print("MODEL RPN")
+model_rpn.summary()
+print("MODEL CLASSIFIER")
+model_classifier.summary()
+print("MODEL ALL")
+model_all.summary()
 # Define
 optimizer_rpn = optimizers.Adam(lr=1e-5)
 optimizer_classifier = optimizers.Adam(lr=1e-5)
@@ -121,7 +136,7 @@ print('Starting training')
 vis = True
 for epoch_num in range(num_epochs):
     print('Epoch {}/{}'.format(epoch_num + 1, num_epochs))
-    progbar = Progbar(epoch_length)
+    progbar = Progbar(epoch_length, verbose=1)
 
     while True:
         try:
@@ -134,9 +149,8 @@ for epoch_num in range(num_epochs):
                 if mean_overlapping_bboxes == 0:
                     print(
                         'RPN is not producing bounding boxes that overlap the ground truth boxes. Check RPN settings or keep training.')
-
             X, Y, img_data = next(data_gen_train)
-            y_rpn_cls, y_rpn_regr = Y
+
             loss_rpn = model_rpn.train_on_batch(X, Y)
             P_rpn = model_rpn.predict_on_batch(X)
 
@@ -194,7 +208,6 @@ for epoch_num in range(num_epochs):
 
             loss_class = model_classifier.train_on_batch([X, X2[:, sel_samples, :]],
                                                          [Y1[:, sel_samples, :], Y2[:, sel_samples, :]])
-
             losses[iter_num, 0] = loss_rpn[1]
             losses[iter_num, 1] = loss_rpn[2]
 
@@ -202,12 +215,11 @@ for epoch_num in range(num_epochs):
             losses[iter_num, 3] = loss_class[2]
             losses[iter_num, 4] = loss_class[3]
 
-            progbar.update(iter_num + 1, [('rpn_cls', losses[iter_num, 0]), ('rpn_regr', losses[iter_num, 1]),
-                                          ('detector_cls', losses[iter_num, 2]),
-                                          ('detector_regr', losses[iter_num, 3])])
-
             iter_num += 1
-
+            progbar.update(iter_num,
+                           [('rpn_cls', np.mean(losses[:iter_num, 0])), ('rpn_regr', np.mean(losses[:iter_num, 1])),
+                            ('detector_cls', np.mean(losses[:iter_num, 2])),
+                            ('detector_regr', np.mean(losses[:iter_num, 3]))])
             if iter_num == epoch_length:
                 loss_rpn_cls = np.mean(losses[:, 0])
                 loss_rpn_regr = np.mean(losses[:, 1])
@@ -238,7 +250,7 @@ for epoch_num in range(num_epochs):
                         best_loss = curr_loss
                         model_all.save_weights(C.model_path)
 
-                    break
+                break
         except Exception as e:
             print('Exception: {}'.format(e))
             continue
