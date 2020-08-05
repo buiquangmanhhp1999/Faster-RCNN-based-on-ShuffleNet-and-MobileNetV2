@@ -20,7 +20,7 @@ tf.config.experimental.list_physical_devices('GPU')
 
 parser = OptionParser()
 parser.add_option("-p", "--path", dest="train_path", help="Path to training data.",
-                  default='./new_data/text_annotated.txt')
+                  default='./data/text_annotated.txt')
 parser.add_option("--hf", dest="horizontal_flips", help="Augment with horizontal flips in training. (Default=false).",
                   action="store_true", default=False)
 parser.add_option("--vf", dest="vertical_flips", help="Augment with vertical flips in training. (Default=false).",
@@ -104,12 +104,12 @@ if C.model_path is not None:
 
 # this is a model that holds both the RPN and the classifier, used to load/save weights for the models
 model_all = Model([img_input, roi_input], rpn[:2] + classifier)
-print("MODEL RPN")
-model_rpn.summary()
-print("MODEL CLASSIFIER")
-model_classifier.summary()
-print("MODEL ALL")
-model_all.summary()
+# print("MODEL RPN")
+# model_rpn.summary()
+# print("MODEL CLASSIFIER")
+# model_classifier.summary()
+# print("MODEL ALL")
+# model_all.summary()
 # Define
 optimizer_rpn = optimizers.Adam(lr=1e-5)
 optimizer_classifier = optimizers.Adam(lr=1e-5)

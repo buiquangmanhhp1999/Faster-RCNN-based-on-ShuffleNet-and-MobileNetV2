@@ -7,19 +7,13 @@ from pathlib import Path
 def get_data(input_path):
     found_bg = False
     all_imgs = {}
-
     classes_count = {}
-
     class_mapping = {}
 
-    i = 0
     with open(input_path, 'r') as f:
         print('Parsing annotation files')
 
         for line in f:
-            # i += 1
-            # if i == 60:
-            #     break
             line_split = line.strip().split(',')
             (filename, class_name, x1, y1, x2, y2) = line_split
 
@@ -71,20 +65,20 @@ def read_data_from_xml(input_path='./data/TEXT_ANNOTATED/'):
     file_path = Path(input_path)
     i = 0
 
-    with open('./new_data/text_annotated.txt', 'w') as f:
+    with open('./data/text_annotated.txt', 'w') as f:
         for path in file_path.glob('*.xml'):
             root = ET.parse(str(path)).getroot()
             file_name = root.find('filename').text
             img = cv2.imread(input_path + file_name)
-            re_name = './new_data/img_' + str(i) + '.png'
+            print(str(path))
+            re_name = './data/new_data/img_' + str(i) + '.png'
             i = i + 1
             cv2.imwrite(re_name, img)
             for title in root.iter('object'):
-                # title_name = title.find('name').text
+                title_name = title.find('name').text
                 bndbox = title.find('bndbox')
                 xmin = bndbox.find('xmin').text
                 ymin = bndbox.find('ymin').text
                 xmax = bndbox.find('xmax').text
                 ymax = bndbox.find('ymax').text
-                f.write(re_name + ',' + 'text' + ',' + xmin + ',' + ymin + ',' + xmax + ',' + ymax + '\n')
-
+                f.write(re_name + ',' + title_name + ',' + xmin + ',' + ymin + ',' + xmax + ',' + ymax + '\n')
